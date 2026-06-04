@@ -10,6 +10,7 @@
 #include <chrono>
 #include <mutex>
 #include <condition_variable>
+#include <functional>
 #include <opencv2/opencv.hpp>
 #include "rknn_api.h"
 #include "rkllm.h"
@@ -42,6 +43,8 @@ private:
     std::mutex          responseMutex_;
     std::condition_variable responseCv_;
     bool                responseReady_ = false;
+    std::function<void(const std::string&)> tokenCallback_;
+    std::mutex          inferenceMutex_;
 private:
     void        DumpTensorAttr(rknn_tensor_attr* attr);
     int         InitImgEnc(const char* model_path);
@@ -55,14 +58,18 @@ public:
     RK35llm();
     virtual ~RK35llm();
 
-    void SetInfo(bool Info);                        //show model information. Default=false.
-    void SetHistory(bool History);                  //remember the conversation (use "clear" to reset). Default=true.
-    void SetSilence(bool Silence);                  //show no output on terminal. Default=false.
+    void SetInfo(bool Info);
+    void SetHistory(bool History);
+    void SetSilence(bool Silence);
+    void SetTokenCallback(std::function<void(const std::string&)> cb);
+    void SetChatTemplate(const char* system, const char* prefix, const char* postfix);
+    void ClearHistory();
 
     bool LoadModel(const std::string& VLMmodel, const std::string& LLMmodel, int32_t NewTokens=2048, int32_t ContextLength=4096);
     void LoadImage(const cv::Mat& img);
 
-    std::string Ask(const std::string& Question);   //ask something and get an answer.
+    std::string Ask(const std::string& Question);
+    std::mutex& GetInferenceMutex() { return inferenceMutex_; }
 };
 //----------------------------------------------------------------------------------------
 #endif // RK35LLM_H

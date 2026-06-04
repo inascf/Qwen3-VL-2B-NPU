@@ -79,7 +79,10 @@ int RK35llm::InstanceCallback(RKLLMResult *result, LLMCallState state)
     else if (state == RKLLM_RUN_NORMAL)
     {
         if(!Silence) printf("%s", result->text);
-        if (result && result->text) responseBuffer_ += result->text;
+        if (result && result->text) {
+            responseBuffer_ += result->text;
+            if (tokenCallback_) tokenCallback_(result->text);
+        }
     }
     return 0;
 }
@@ -281,6 +284,22 @@ void RK35llm::SetHistory(bool _History)
 void RK35llm::SetSilence(bool _Silence)
 {
     Silence = _Silence;
+}
+//----------------------------------------------------------------------------------------
+void RK35llm::SetTokenCallback(std::function<void(const std::string&)> cb)
+{
+    std::lock_guard<std::mutex> lk(responseMutex_);
+    tokenCallback_ = std::move(cb);
+}
+//----------------------------------------------------------------------------------------
+void RK35llm::SetChatTemplate(const char* system, const char* prefix, const char* postfix)
+{
+    if (llmHandle) rkllm_set_chat_template(llmHandle, system, prefix, postfix);
+}
+//----------------------------------------------------------------------------------------
+void RK35llm::ClearHistory()
+{
+    if (llmHandle) rkllm_clear_kv_cache(llmHandle, 0, nullptr, nullptr);
 }
 //----------------------------------------------------------------------------------------
 bool RK35llm::LoadModel(const std::string& VLMmodel, const std::string& LLMmodel, int32_t NewTokens, int32_t ContextLength)
