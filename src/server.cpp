@@ -126,9 +126,15 @@ void VLM_Server::OnCompletion(const httplib::Request& req, httplib::Response& re
     }
 
     InferRequest ir;
-    ir.prompt     = body.value("prompt", "");
     ir.stream     = body.value("stream", false);
     ir.max_tokens = body.value("n_predict", -1);
+
+    // Wrap raw prompt in Qwen3 chat format so the model has a clear stop signal.
+    // Without chat tokens a chat-tuned model generates until max_new_tokens (2048).
+    std::string raw = body.value("prompt", "");
+    ir.prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                "<|im_start|>user\n" + raw + "<|im_end|>\n"
+                "<|im_start|>assistant\n";
 
     if (body.contains("image_data") && body["image_data"].is_array()
         && !body["image_data"].empty())
