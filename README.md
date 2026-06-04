@@ -117,19 +117,34 @@ Copy both into this folder.
 
 ### Building the app.
 Once you have the two models, it is time to build your application.<br>
-You can use **Code::Blocks**.
-- Load the project file *.cbp in Code::Blocks.
-- Select _Release_, not Debug.
-- Compile and run with F9.
-- You can alter command line arguments with _Project -> Set programs arguments..._ 
 
-Or use **Cmake**.
-```
+**CMake** (recommended — builds both the CLI and the HTTP server):
+```bash
 $ mkdir build
 $ cd build
-$ cmake ..
+$ cmake ..          # downloads cpp-httplib and nlohmann/json automatically on first run
 $ make -j4
 ```
+This produces two executables in the project root:
+- `VLM_NPU` — interactive CLI (original)
+- `VLM_server` — HTTP server with llama-server / OpenAI-compatible API
+
+You can also build only one target:
+```bash
+$ make -j4 VLM_NPU
+$ make -j4 VLM_server
+```
+
+**Code::Blocks** (CLI only):
+- Load the project file `*.cbp` in Code::Blocks.
+- Select _Release_, not Debug.
+- Compile and run with F9.
+- You can alter command line arguments with _Project → Set programs arguments..._
+
+---
+
+## CLI usage (`VLM_NPU`)
+
 ### Running the app.
 The app has the following arguments.
 ```bash
@@ -140,27 +155,27 @@ VLM_NPU Picture RKNN_model RKLLM_model NewTokens ContextLength
 | picture | The image. Provide a dummy if you don't want to use an image | 
 | RKNN_model | The visual encoder model (vlm) | 
 | RKLLM_model | The large language model (llm) | 
-| NewTokens | This sets the maximum number of new tokens. Optional, default 2048| 
-| ContextLength | This specifies the maximum total number of tokens the model can process. Optional, default 4096| 
+| NewTokens | Maximum number of new tokens to generate. Optional, default 2048 | 
+| ContextLength | Maximum total tokens the model can process. Optional, default 4096 | 
 
 <br>In the context of the Rockchip RK3588 LLM (Large Language Model) library, the parameters NewTokens and ContextLength both control different limits for text generation, and they're typical in LLM workflows.<br>
 **NewTokens**<br> 
-This sets the maximum number of tokens (pieces of text, typically sub-word units) that the model is allowed to generate in response to a prompt during a single inference round. For example, if set to 300, the model will not return more than 300 tokens as output, regardless of the prompt length. It's important for controlling generation length to avoid too-short or too-long responses, helping manage resource use and output size.<br>
+This sets the maximum number of tokens (pieces of text, typically sub-word units) that the model is allowed to generate in response to a prompt during a single inference round. For example, if set to 300, the model will not return more than 300 tokens as output, regardless of the prompt length.<br>
 **ContextLength**<br>
-This specifies the maximum total number of tokens the model can process in one go, which includes both the prompt (input) tokens and all generated tokens. For example, if set to 2048 and your prompt already uses 500 tokens, the model can generate up to 2048-500 = 1548 new tokens. This is a hardware and architecture constraint set during model conversion and deployment, as the context window cannot exceed the model's design limit (for instance, 4096 or 8192 tokens depending on the model variant).
+This specifies the maximum total number of tokens the model can process in one go, which includes both the prompt (input) tokens and all generated tokens. For example, if set to 2048 and your prompt already uses 500 tokens, the model can generate up to 2048-500 = 1548 new tokens.
 
 A typical command line can be:
 ```bash
 ./VLM_NPU ./Moon.jpg ./models/qwen3-vl-2b-vision_rk3588.rknn ./models/qwen3-vl-2b-instruct_w8a8_rk3588.rkllm 2048 4096
 ```
 The NewTokens (2048) and ContextLength (4096) are optional and can be omitted.
+
 ### Using the app.
 Using the application is simple. Once you provide the image and the models, you can ask everything you want.<br>
-Remember, we are on a bare Rock5C, so don't expect the same quality answers as ChatGPT can provide.<br>
-On the other hand, when you see the examples below, the app performs amazingly well.<br><br>
 If you want to talk about the picture, you need to include the token `<image>` in your prompt once.<br>
 The app remembers the dialogue until you give the token `<clear>`.<br>
-With `<exit>`, you leave the application.
+With `exit`, you leave the application.
+
 ### C++ code.  
 Below, you find the surprisingly little code of main.cpp. 
 ```cpp
@@ -197,13 +212,221 @@ int main(int argc, char** argv)
     return 0;
 }
 ```
-Most code speaks for itself. One remark.<br>
 The LLM generates the answer to your request in little pieces of text. You see them as if the LLM is typing on your terminal.<br>
-RKLLM.SetSilence controls this behaviour. When set to `true`, it will suppress this output. RKLLM.Ask() also returns the complete answer.<br>
-In main.cpp uncomment this line:
-```cpp
-std::cout << "\nLLM Answer: " << output_str << std::endl;
+`RKLLM.SetSilence(true)` suppresses this output; `RKLLM.Ask()` still returns the complete answer.
+
+---
+
+## HTTP Server (`VLM_server`)
+
+`VLM_server` exposes the model over HTTP with two compatible API styles:
+- **llama-server native** format (`/completion`)
+- **OpenAI-compatible** format (`/v1/chat/completions`)
+
+Both support **streaming** (Server-Sent Events) and **multimodal image input**.
+
+### Starting the server
+
+```bash
+./VLM_server <vlm_model> <llm_model> [options]
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--host <addr>` | `0.0.0.0` | Bind address |
+| `--port <n>` | `8080` | Listen port |
+| `--model-name <name>` | `qwen3-vl-2b` | Model ID returned by `/v1/models` |
+| `--max-tokens <n>` | `2048` | Maximum new tokens per request |
+| `--context <n>` | `4096` | Context window length |
+
+Example:
+```bash
+./VLM_server ./models/qwen3-vl-2b-vision_rk3588.rknn \
+             ./models/qwen3-vl-2b-instruct_w8a8_rk3588.rkllm \
+             --port 8080
+```
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET  | `/health` | Health check |
+| GET  | `/props` | Server / model properties |
+| GET  | `/v1/models` | List available models (OpenAI format) |
+| POST | `/completion` | Text / image completion (llama-server format) |
+| POST | `/v1/chat/completions` | Chat completion (OpenAI format) |
+| POST | `/tokenize` | Token count estimate |
+
+---
+
+### `GET /health`
+
+```bash
+curl http://localhost:8080/health
+```
+```json
+{"status": "ok"}
+```
+
+---
+
+### `GET /v1/models`
+
+```bash
+curl http://localhost:8080/v1/models
+```
+```json
+{
+  "object": "list",
+  "data": [{"id": "qwen3-vl-2b", "object": "model", "owned_by": "local"}]
+}
+```
+
+---
+
+### `POST /v1/chat/completions` — OpenAI-compatible
+
+#### Text-only, non-streaming
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-vl-2b",
+    "messages": [
+      {"role": "user", "content": "What is the capital of France?"}
+    ]
+  }'
+```
+
+#### Text-only, streaming
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-vl-2b",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "Explain the Pythagorean theorem."}
+    ]
+  }'
+```
+
+#### Image input (base64), streaming
+
+```bash
+IMAGE_B64=$(base64 -w 0 Moon.jpg)
+
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"qwen3-vl-2b\",
+    \"stream\": true,
+    \"messages\": [{
+      \"role\": \"user\",
+      \"content\": [
+        {\"type\": \"text\",      \"text\": \"Describe this image.\"},
+        {\"type\": \"image_url\",
+         \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE_B64}\"}}
+      ]
+    }]
+  }"
+```
+
+#### Multi-turn conversation
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-vl-2b",
+    "messages": [
+      {"role": "user",      "content": "My name is Alice."},
+      {"role": "assistant", "content": "Nice to meet you, Alice!"},
+      {"role": "user",      "content": "What is my name?"}
+    ]
+  }'
+```
+
+---
+
+### `POST /completion` — llama-server native format
+
+#### Text-only
+
+```bash
+curl http://localhost:8080/completion \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "The capital of France is",
+    "n_predict": 64
+  }'
+```
+
+#### With image (`image_data` field), streaming
+
+```bash
+IMAGE_B64=$(base64 -w 0 Moon.jpg)
+
+curl http://localhost:8080/completion \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"prompt\": \"Describe the image. <image>\",
+    \"stream\": true,
+    \"image_data\": [{\"data\": \"${IMAGE_B64}\", \"id\": 1}]
+  }"
+```
+
+---
+
+### Streaming response format
+
+When `"stream": true`, the server sends [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events):
+
+```
+data: {"id":"chatcmpl-a1b2c3","object":"chat.completion.chunk","created":1234567890,"model":"qwen3-vl-2b","choices":[{"index":0,"delta":{"content":"The"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-a1b2c3","object":"chat.completion.chunk","created":1234567890,"model":"qwen3-vl-2b","choices":[{"index":0,"delta":{"content":" capital"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-a1b2c3","object":"chat.completion.chunk","created":1234567890,"model":"qwen3-vl-2b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+This format is compatible with the OpenAI Python SDK and most tools that support the OpenAI API.
+
+### Using with the OpenAI Python SDK
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://your-rock5-ip:8080/v1",
+    api_key="not-needed"
+)
+
+# Text chat
+response = client.chat.completions.create(
+    model="qwen3-vl-2b",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.choices[0].message.content)
+
+# Streaming
+for chunk in client.chat.completions.create(
+    model="qwen3-vl-2b",
+    messages=[{"role": "user", "content": "Tell me a joke."}],
+    stream=True
+):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+### Notes
+
+- **Concurrency**: The RK3588 NPU handles one inference at a time. Simultaneous requests are serialised automatically — each request waits in a queue until the previous one finishes.
+- **Stateless**: Each request is self-contained. For multi-turn conversations, pass the full message history in the `messages` array (same as the OpenAI API).
+- **Image support**: One image per request is supported. The image must be sent as a base64 data URL (`data:image/jpeg;base64,...`) in the `content` array (`/v1/chat/completions`) or in the `image_data` field (`/completion`).
 
 ------------
 
