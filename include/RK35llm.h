@@ -11,7 +11,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <functional>
-#include <opencv2/opencv.hpp>
+#include <vector>
 #include "rknn_api.h"
 #include "rkllm.h"
 //----------------------------------------------------------------------------------------
@@ -45,15 +45,15 @@ private:
     bool                responseReady_ = false;
     std::function<void(const std::string&)> tokenCallback_;
     std::mutex          inferenceMutex_;
+    // Image buffer (raw RGB, model_width * model_height * 3)
+    std::vector<uint8_t> resized_img_data_;
 private:
     void        DumpTensorAttr(rknn_tensor_attr* attr);
     int         InitImgEnc(const char* model_path);
     int         RunImgEnc(void);
     static int  StaticCallback(RKLLMResult* result, void* userdata, LLMCallState state);
     int         InstanceCallback(RKLLMResult* result, LLMCallState state);
-    cv::Mat     Expand2Square(const cv::Mat& img, const cv::Scalar& background_color = cv::Scalar(127,127,127));
-protected:
-    cv::Mat resized_img;
+    bool        ProcessRawImage(const uint8_t* rgb, int w, int h);
 public:
     RK35llm();
     virtual ~RK35llm();
@@ -66,7 +66,11 @@ public:
     void ClearHistory();
 
     bool LoadModel(const std::string& VLMmodel, const std::string& LLMmodel, int32_t NewTokens=2048, int32_t ContextLength=4096);
-    void LoadImage(const cv::Mat& img);
+
+    // Load image from a file path (for CLI use)
+    bool LoadImage(const std::string& filepath);
+    // Load image from an encoded buffer, e.g. JPEG/PNG bytes decoded from base64 (for server use)
+    bool LoadImageFromMemory(const void* data, size_t len);
 
     std::string Ask(const std::string& Question);
     std::mutex& GetInferenceMutex() { return inferenceMutex_; }

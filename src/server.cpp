@@ -16,7 +16,6 @@ VLM_Server::VLM_Server(RK35llm& model,
                        const std::string& model_name)
     : model_(model), host_(host), port_(port), model_name_(model_name)
 {
-    // Disable auto chat-template wrapping; server builds the full prompt itself
     model_.SetChatTemplate("", "", "");
     model_.SetSilence(true);
     RegisterRoutes();
@@ -48,7 +47,6 @@ void VLM_Server::RegisterRoutes()
     svr_.Post("/v1/chat/completions",[this](auto& q, auto& r){ OnChat(q,r); });
     svr_.Post("/tokenize",           [this](auto& q, auto& r){ OnTokenize(q,r); });
 
-    // CORS pre-flight
     svr_.Options(".*", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin",  "*");
         res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -56,9 +54,7 @@ void VLM_Server::RegisterRoutes()
         res.status = 204;
     });
 
-    svr_.set_default_headers({
-        {"Access-Control-Allow-Origin", "*"}
-    });
+    svr_.set_default_headers({{"Access-Control-Allow-Origin", "*"}});
 }
 
 //──────────────────────────────────────────────
@@ -66,20 +62,19 @@ void VLM_Server::RegisterRoutes()
 //──────────────────────────────────────────────
 void VLM_Server::OnHealth(const httplib::Request&, httplib::Response& res)
 {
-    json body = {{"status", "ok"}};
-    res.set_content(body.dump(), "application/json");
+    res.set_content("{\"status\":\"ok\"}", "application/json");
 }
 
 //──────────────────────────────────────────────
-// GET /props  (llama-server compatible)
+// GET /props
 //──────────────────────────────────────────────
 void VLM_Server::OnProps(const httplib::Request&, httplib::Response& res)
 {
     json body = {
-        {"model_alias",    model_name_},
-        {"total_slots",    1},
-        {"chat_template",  "qwen3"},
-        {"multimodal",     true}
+        {"model_alias",   model_name_},
+        {"total_slots",   1},
+        {"chat_template", "qwen3"},
+        {"multimodal",    true}
     };
     res.set_content(body.dump(), "application/json");
 }
@@ -102,7 +97,7 @@ void VLM_Server::OnModels(const httplib::Request&, httplib::Response& res)
 }
 
 //──────────────────────────────────────────────
-// POST /tokenize  (stub — we don't have tokenizer access)
+// POST /tokenize
 //──────────────────────────────────────────────
 void VLM_Server::OnTokenize(const httplib::Request& req, httplib::Response& res)
 {
@@ -113,14 +108,13 @@ void VLM_Server::OnTokenize(const httplib::Request& req, httplib::Response& res)
         return;
     }
     std::string content = body.value("content", "");
-    // Rough estimate: 1 token ≈ 4 chars
     int est = (int)(content.size() / 4) + 1;
     json out = {{"tokens", json::array()}, {"estimated_count", est}};
     res.set_content(out.dump(), "application/json");
 }
 
 //──────────────────────────────────────────────
-// POST /completion  (llama-server native format)
+// POST /completion
 //──────────────────────────────────────────────
 void VLM_Server::OnCompletion(const httplib::Request& req, httplib::Response& res)
 {
@@ -135,16 +129,14 @@ void VLM_Server::OnCompletion(const httplib::Request& req, httplib::Response& re
     ir.prompt     = body.value("prompt", "");
     ir.stream     = body.value("stream", false);
     ir.max_tokens = body.value("n_predict", -1);
-    ir.keep_hist  = 0;
 
-    // Optional image_data: [{"data": "<base64>", "id": 1}]
     if (body.contains("image_data") && body["image_data"].is_array()
         && !body["image_data"].empty())
     {
         std::string b64 = body["image_data"][0].value("data", "");
         if (!b64.empty()) {
-            ir.image     = DecodeB64Image(b64);
-            ir.has_image = !ir.image.empty();
+            ir.image_data = Base64DecodeBytes(b64);
+            ir.has_image  = !ir.image_data.empty();
         }
     }
 
@@ -160,7 +152,6 @@ void VLM_Server::OnCompletion(const httplib::Request& req, httplib::Response& re
         return;
     }
 
-    // Streaming
     std::string rid = MakeId("cmpl-");
     res.set_chunked_content_provider("text/event-stream",
         [this, ir, rid](size_t, httplib::DataSink& sink) -> bool {
@@ -170,7 +161,7 @@ void VLM_Server::OnCompletion(const httplib::Request& req, httplib::Response& re
 }
 
 //──────────────────────────────────────────────
-// POST /v1/chat/completions  (OpenAI-compatible)
+// POST /v1/chat/completions
 //──────────────────────────────────────────────
 void VLM_Server::OnChat(const httplib::Request& req, httplib::Response& res)
 {
@@ -192,11 +183,10 @@ void VLM_Server::OnChat(const httplib::Request& req, httplib::Response& res)
     InferRequest ir;
     ir.prompt     = pc.prompt;
     ir.has_image  = pc.has_image;
-    ir.image      = pc.image;
+    ir.image_data = std::move(pc.image_data);
     ir.stream     = body.value("stream", false);
     ir.max_tokens = body.value("max_tokens", -1);
     ir.thinking   = pc.thinking;
-    ir.keep_hist  = 0;
 
     if (!ir.stream) {
         std::string text = RunBlocking(ir);
@@ -239,8 +229,8 @@ std::string VLM_Server::RunBlocking(const InferRequest& ir)
     model_.ClearHistory();
     model_.SetTokenCallback(nullptr);
 
-    if (ir.has_image && !ir.image.empty())
-        model_.LoadImage(ir.image);
+    if (ir.has_image && !ir.image_data.empty())
+        model_.LoadImageFromMemory(ir.image_data.data(), ir.image_data.size());
 
     std::string q = ir.prompt;
     if (ir.has_image && q.find("<image>") == std::string::npos)
@@ -257,37 +247,32 @@ void VLM_Server::RunStreaming(const InferRequest& ir,
                               httplib::DataSink& sink,
                               bool openai_format)
 {
-    // Shared token queue between inference callback and this SSE sink
     struct State {
         std::mutex              mu;
         std::condition_variable cv;
         std::deque<std::string> tokens;
         bool                    done  = false;
-        bool                    error = false;
     };
     auto st = std::make_shared<State>();
 
-    // Inference runs in a separate thread so this function can stream concurrently
     std::thread infer_thread([this, &ir, st]() {
         std::lock_guard<std::mutex> lock(model_.GetInferenceMutex());
 
         model_.ClearHistory();
-
         model_.SetTokenCallback([st](const std::string& tok) {
             std::lock_guard<std::mutex> lg(st->mu);
             st->tokens.push_back(tok);
             st->cv.notify_one();
         });
 
-        if (ir.has_image && !ir.image.empty())
-            model_.LoadImage(ir.image);
+        if (ir.has_image && !ir.image_data.empty())
+            model_.LoadImageFromMemory(ir.image_data.data(), ir.image_data.size());
 
         std::string q = ir.prompt;
         if (ir.has_image && q.find("<image>") == std::string::npos)
             q += " <image>";
 
         model_.Ask(q);
-
         model_.SetTokenCallback(nullptr);
 
         std::lock_guard<std::mutex> lg(st->mu);
@@ -297,7 +282,6 @@ void VLM_Server::RunStreaming(const InferRequest& ir,
 
     int64_t created = (int64_t)time(nullptr);
 
-    // Drain token queue and write SSE events
     while (true) {
         std::unique_lock<std::mutex> lk(st->mu);
         st->cv.wait(lk, [&st]{ return !st->tokens.empty() || st->done; });
@@ -337,7 +321,7 @@ void VLM_Server::RunStreaming(const InferRequest& ir,
         if (st->done && st->tokens.empty()) break;
     }
 
-    // Send final stop chunk
+    // Final stop chunk
     if (openai_format) {
         json last = {
             {"id",      req_id},
@@ -353,18 +337,18 @@ void VLM_Server::RunStreaming(const InferRequest& ir,
         std::string s = "data: " + last.dump() + "\n\n";
         sink.write(s.c_str(), s.size());
     } else {
-        std::string s = "data: {\"content\":\"\",\"stop\":true}\n\n";
-        sink.write(s.c_str(), s.size());
+        std::string_view s = "data: {\"content\":\"\",\"stop\":true}\n\n";
+        sink.write(s.data(), s.size());
     }
 
-    std::string done_msg = "data: [DONE]\n\n";
-    sink.write(done_msg.c_str(), done_msg.size());
+    std::string_view done_msg = "data: [DONE]\n\n";
+    sink.write(done_msg.data(), done_msg.size());
 
     infer_thread.join();
 }
 
 //──────────────────────────────────────────────
-// Parse OpenAI messages → formatted Qwen3 prompt
+// Parse OpenAI messages → Qwen3 formatted prompt
 //──────────────────────────────────────────────
 VLM_Server::ParsedChat VLM_Server::ParseChatMessages(const json& messages)
 {
@@ -375,7 +359,6 @@ VLM_Server::ParsedChat VLM_Server::ParseChatMessages(const json& messages)
     for (auto& msg : messages) {
         std::string role    = msg.value("role", "user");
         std::string content;
-        bool        msg_img = false;
 
         if (msg["content"].is_string()) {
             content = msg["content"].get<std::string>();
@@ -387,10 +370,9 @@ VLM_Server::ParsedChat VLM_Server::ParseChatMessages(const json& messages)
                 } else if (type == "image_url") {
                     std::string url = part["image_url"].value("url", "");
                     if (!url.empty()) {
-                        out.image     = DecodeB64Image(url);
-                        out.has_image = !out.image.empty();
-                        msg_img       = true;
-                        content      += "<image>";
+                        out.image_data = Base64DecodeBytes(url);
+                        out.has_image  = !out.image_data.empty();
+                        content       += "<image>";
                     }
                 }
             }
@@ -406,46 +388,21 @@ VLM_Server::ParsedChat VLM_Server::ParseChatMessages(const json& messages)
         }
     }
 
-    if (!has_system) {
+    if (!has_system)
         prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n" + prompt;
-    }
 
-    // Append the assistant turn opener so the model generates from here
     prompt += "<|im_start|>assistant\n";
     out.prompt = prompt;
     return out;
 }
 
 //──────────────────────────────────────────────
-// Base64 decode
+// Base64 decode → raw bytes
 //──────────────────────────────────────────────
-std::string VLM_Server::Base64Decode(const std::string& in)
+std::vector<uint8_t> VLM_Server::Base64DecodeBytes(const std::string& b64_or_url)
 {
-    static const std::string chars =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    std::string out;
-    std::vector<int> T(256, -1);
-    for (int i = 0; i < 64; i++) T[(unsigned char)chars[i]] = i;
-
-    int val = 0, bits = -8;
-    for (unsigned char c : in) {
-        if (T[c] == -1) break;
-        val = (val << 6) + T[c];
-        bits += 6;
-        if (bits >= 0) {
-            out += (char)((val >> bits) & 0xFF);
-            bits -= 8;
-        }
-    }
-    return out;
-}
-
-cv::Mat VLM_Server::DecodeB64Image(const std::string& b64_or_url)
-{
+    // Strip "data:image/xxx;base64," prefix if present
     std::string data = b64_or_url;
-
-    // Strip "data:image/xxx;base64," prefix
     size_t comma = data.find(',');
     if (comma != std::string::npos)
         data = data.substr(comma + 1);
@@ -453,11 +410,39 @@ cv::Mat VLM_Server::DecodeB64Image(const std::string& b64_or_url)
     // Remove whitespace
     data.erase(std::remove_if(data.begin(), data.end(), ::isspace), data.end());
 
-    std::string raw = Base64Decode(data);
-    if (raw.empty()) return {};
+    static const int8_t T[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
 
-    std::vector<uint8_t> buf(raw.begin(), raw.end());
-    return cv::imdecode(buf, cv::IMREAD_COLOR);
+    std::vector<uint8_t> out;
+    out.reserve(data.size() * 3 / 4);
+
+    int val = 0, bits = -8;
+    for (unsigned char c : data) {
+        if (T[c] == -1) break;
+        val = (val << 6) | T[c];
+        bits += 6;
+        if (bits >= 0) {
+            out.push_back((val >> bits) & 0xFF);
+            bits -= 8;
+        }
+    }
+    return out;
 }
 
 //──────────────────────────────────────────────
@@ -465,7 +450,8 @@ cv::Mat VLM_Server::DecodeB64Image(const std::string& b64_or_url)
 //──────────────────────────────────────────────
 std::string VLM_Server::MakeId(const char* prefix)
 {
-    static std::mt19937_64 rng(std::chrono::steady_clock::now().time_since_epoch().count());
+    static std::mt19937_64 rng(
+        std::chrono::steady_clock::now().time_since_epoch().count());
     std::ostringstream ss;
     ss << prefix << std::hex << rng();
     return ss.str();

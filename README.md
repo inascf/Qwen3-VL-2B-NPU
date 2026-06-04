@@ -72,22 +72,18 @@ The duration depends on your OS, I/O transfer rate, and memory mapping.<br>
 
 ## Dependencies.
 To run the application, you have to:
-- OpenCV 64-bit installed.
-- rkllm library.
-- rknn library.
+- rkllm library (v1.2.3+)
+- rknn library (rknpu driver v0.9.8+)
+
+No other external dependencies. Image decoding and resizing use
+[stb_image](https://github.com/nothings/stb) which is bundled in `third_party/`.
 
 ### Installing the dependencies.
-Start with the usual 
+Start with the usual
 ```
-$ sudo apt-get update 
+$ sudo apt-get update
 $ sudo apt-get upgrade
-$ sudo apt-get install cmake wget curl
-```
-#### OpenCV
-To install OpenCV on your SBC, follow the Raspberry Pi 4 [guide](https://qengineering.eu/install-opencv-on-raspberry-64-os.html).<br><br>
-Or, when you have no intentions to program code:
-```
-$ sudo apt-get install libopencv-dev 
+$ sudo apt-get install cmake wget curl build-essential
 ```
 ------------
 

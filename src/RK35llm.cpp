@@ -1,4 +1,10 @@
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize2.h"
+
 #include "RK35llm.h"
+#include <algorithm>
 
 #define HISTORY true
 //----------------------------------------------------------------------------------------
@@ -87,30 +93,33 @@ int RK35llm::InstanceCallback(RKLLMResult *result, LLMCallState state)
     return 0;
 }
 //----------------------------------------------------------------------------------------
-// Expand the image into a square and fill it with the specified background color
-cv::Mat RK35llm::Expand2Square(const cv::Mat& img, const cv::Scalar& background_color)
+// Pad image to square, then resize to model input dimensions.
+// rgb: input RGB pixels (3 bytes/pixel), w x h
+bool RK35llm::ProcessRawImage(const uint8_t* rgb, int w, int h)
 {
-    int width = img.cols;
-    int height = img.rows;
+    int tgt_w    = rknn_app_ctx.model_width;
+    int tgt_h    = rknn_app_ctx.model_height;
+    int channels = 3;
 
-    // If the width and height are equal, return to the original image directly
-    if (width == height) {
-        return img.clone();
+    // Expand to square with gray padding (value 127, matching original 127.5 → uint8)
+    int sq = std::max(w, h);
+    std::vector<uint8_t> square(sq * sq * channels, 127);
+    int x_off = (sq - w) / 2;
+    int y_off = (sq - h) / 2;
+    for (int row = 0; row < h; row++) {
+        memcpy(square.data() + ((row + y_off) * sq + x_off) * channels,
+               rgb  + row * w * channels,
+               w * channels);
     }
 
-    // Calculate the new size and create a new image
-    int size = std::max(width, height);
-    cv::Mat result(size, size, img.type(), background_color);
+    // Bilinear resize to model input size (same algorithm as cv::INTER_LINEAR)
+    resized_img_data_.resize(tgt_w * tgt_h * channels);
+    stbir_resize_uint8_linear(
+        square.data(), sq,    sq,    0,
+        resized_img_data_.data(), tgt_w, tgt_h, 0,
+        STBIR_RGB);
 
-    // Calculate the image paste position
-    int x_offset = (size - width) / 2;
-    int y_offset = (size - height) / 2;
-
-    // Paste the original image into the center of the new image
-    cv::Rect roi(x_offset, y_offset, width, height);
-    img.copyTo(result(roi));
-
-    return result;
+    return true;
 }
 //----------------------------------------------------------------------------------------
 int RK35llm::InitImgEnc(const char* model_path)
@@ -138,7 +147,6 @@ int RK35llm::InitImgEnc(const char* model_path)
         return -1;
     }
 
-    // Get Model Input Output Number
     rknn_input_output_num io_num;
     ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
     if (ret != RKNN_SUCC) {
@@ -147,7 +155,6 @@ int RK35llm::InitImgEnc(const char* model_path)
     }
     if(Info) printf("\nmodel input num: %d, output num: %d\n", io_num.n_input, io_num.n_output);
 
-    // Get Model Input Info
     if(Info) printf("\nInput tensors:\n");
     rknn_tensor_attr input_attrs[io_num.n_input];
     memset(input_attrs, 0, sizeof(input_attrs));
@@ -161,7 +168,6 @@ int RK35llm::InitImgEnc(const char* model_path)
         DumpTensorAttr(&(input_attrs[i]));
     }
 
-    // Get Model Output Info
     if(Info) printf("\nOutput tensors:\n");
     rknn_tensor_attr output_attrs[io_num.n_output];
     memset(output_attrs, 0, sizeof(output_attrs));
@@ -174,7 +180,7 @@ int RK35llm::InitImgEnc(const char* model_path)
         }
         DumpTensorAttr(&(output_attrs[i]));
     }
-    // Set to context
+
     for (int i = 0; i < 4; i++) {
         if (output_attrs[0].dims[i] > 1) {
             rknn_app_ctx.model_image_token = output_attrs[0].dims[i];
@@ -190,12 +196,10 @@ int RK35llm::InitImgEnc(const char* model_path)
     memcpy(rknn_app_ctx.output_attrs, output_attrs, io_num.n_output * sizeof(rknn_tensor_attr));
 
     if (input_attrs[0].fmt == RKNN_TENSOR_NCHW) {
-        // printf("model is NCHW input fmt\n");
         rknn_app_ctx.model_channel = input_attrs[0].dims[1];
         rknn_app_ctx.model_height  = input_attrs[0].dims[2];
         rknn_app_ctx.model_width   = input_attrs[0].dims[3];
     } else {
-        // printf("model is NHWC input fmt\n");
         rknn_app_ctx.model_height  = input_attrs[0].dims[1];
         rknn_app_ctx.model_width   = input_attrs[0].dims[2];
         rknn_app_ctx.model_channel = input_attrs[0].dims[3];
@@ -218,12 +222,11 @@ int RK35llm::RunImgEnc(void)
     memset(inputs, 0, sizeof(inputs));
     memset(outputs, 0, sizeof(outputs));
 
-    // Set Input Data
     inputs[0].index = 0;
     inputs[0].type  = RKNN_TENSOR_UINT8;
     inputs[0].fmt   = RKNN_TENSOR_NHWC;
     inputs[0].size  = rknn_app_ctx.model_width * rknn_app_ctx.model_height * rknn_app_ctx.model_channel;
-    inputs[0].buf   = resized_img.data;
+    inputs[0].buf   = resized_img_data_.data();
 
     ret = rknn_inputs_set(rknn_app_ctx.rknn_ctx, 1, inputs);
     if (ret < 0) {
@@ -231,14 +234,12 @@ int RK35llm::RunImgEnc(void)
         return -1;
     }
 
-    // Run
     ret = rknn_run(rknn_app_ctx.rknn_ctx, nullptr);
     if (ret < 0) {
         printf("rknn_run fail! ret=%d\n", ret);
         return -1;
     }
 
-    // Get Output
     for (uint32_t j=0; j<rknn_app_ctx.io_num.n_output; j++) {
         outputs[j].want_float = 1;
     }
@@ -248,10 +249,8 @@ int RK35llm::RunImgEnc(void)
         return ret;
     }
 
-    // Post Process
     if(rknn_app_ctx.io_num.n_output == 1) memcpy(ImgVec, outputs[0].buf, outputs[0].size);
     else {
-        // concat deepstacks and input_embed
         for(int i=0; i<rknn_app_ctx.model_image_token; i++){
             for (uint32_t j = 0; j < rknn_app_ctx.io_num.n_output; j++) {
                 memcpy(ImgVec + i * rknn_app_ctx.io_num.n_output * rknn_app_ctx.model_embed_size + j * rknn_app_ctx.model_embed_size,
@@ -260,9 +259,7 @@ int RK35llm::RunImgEnc(void)
         }
     }
 
-    // Remeber to release rknn output
     rknn_outputs_release(rknn_app_ctx.rknn_ctx, 1, outputs);
-
     return ret;
 }
 //----------------------------------------------------------------------------------------
@@ -313,11 +310,9 @@ bool RK35llm::LoadModel(const std::string& VLMmodel, const std::string& LLMmodel
     else{
         if(Info) printf("rkllm init success\n");
     }
-    // IMPORTANT: only set chat template after rkllm_init succeeded and llmHandle is valid
 
     #if HISTORY
         rkllm_infer_params.keep_history = 1;
-        // check return value (good practice)
         int setret = rkllm_set_chat_template(llmHandle,
              "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n",
              "<|im_start|>user\n",
@@ -335,26 +330,50 @@ bool RK35llm::LoadModel(const std::string& VLMmodel, const std::string& LLMmodel
     return true;
 }
 //----------------------------------------------------------------------------------------
-void RK35llm::LoadImage(const cv::Mat& img)
+bool RK35llm::LoadImage(const std::string& filepath)
 {
-    // OpenCV image is in BGR format
-    cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
+    int w, h, c;
+    // stb_image reads as RGB natively (no BGR swap needed unlike OpenCV)
+    uint8_t* pixels = stbi_load(filepath.c_str(), &w, &h, &c, 3);
+    if (!pixels) {
+        printf("stbi_load failed: %s\n", filepath.c_str());
+        return false;
+    }
 
-    // Expand the image into a square and fill it with the specified background color (According the modeling_minicpmv.py)
-    cv::Scalar background_color(127.5, 127.5, 127.5);
-    cv::Mat square_img = Expand2Square(img, background_color);
+    bool ok = ProcessRawImage(pixels, w, h);
+    stbi_image_free(pixels);
 
-    // Resize the image
-    size_t image_width = rknn_app_ctx.model_width;
-    size_t image_height = rknn_app_ctx.model_height;
-    cv::Size new_size(image_width, image_height);
-    cv::resize(square_img, resized_img, new_size, 0, 0, cv::INTER_LINEAR);
+    if (!ok) return false;
 
-    // Get the embeds
     int ret = RunImgEnc();
     if (ret != 0) {
         printf("run_imgenc fail! ret=%d\n", ret);
+        return false;
     }
+    return true;
+}
+//----------------------------------------------------------------------------------------
+bool RK35llm::LoadImageFromMemory(const void* data, size_t len)
+{
+    int w, h, c;
+    uint8_t* pixels = stbi_load_from_memory(
+        static_cast<const stbi_uc*>(data), (int)len, &w, &h, &c, 3);
+    if (!pixels) {
+        printf("stbi_load_from_memory failed\n");
+        return false;
+    }
+
+    bool ok = ProcessRawImage(pixels, w, h);
+    stbi_image_free(pixels);
+
+    if (!ok) return false;
+
+    int ret = RunImgEnc();
+    if (ret != 0) {
+        printf("run_imgenc fail! ret=%d\n", ret);
+        return false;
+    }
+    return true;
 }
 //----------------------------------------------------------------------------------------
 std::string RK35llm::Ask(const std::string& Question)
@@ -363,7 +382,6 @@ std::string RK35llm::Ask(const std::string& Question)
 
     if (!llmHandle) return Str;
 
-    // Clear previous response
     {
         std::lock_guard<std::mutex> lk(responseMutex_);
         responseBuffer_.clear();
@@ -397,7 +415,6 @@ std::string RK35llm::Ask(const std::string& Question)
         std::cerr << "rkllm_run returned " << ret << "\n";
     }
 
-    // Wait until callback signals completion
     std::unique_lock<std::mutex> lk(responseMutex_);
     responseCv_.wait(lk, [this]{ return responseReady_; });
 

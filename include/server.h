@@ -5,6 +5,7 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 #include <deque>
 #include <atomic>
 #include <thread>
@@ -36,41 +37,33 @@ private:
     void OnChat        (const httplib::Request&, httplib::Response&);
     void OnTokenize    (const httplib::Request&, httplib::Response&);
 
-    // Helpers
     struct InferRequest {
-        std::string           prompt;
-        bool                  has_image = false;
-        cv::Mat               image;
-        bool                  stream    = false;
-        int                   max_tokens = -1;
-        bool                  thinking  = false;
-        int                   keep_hist = 0;
+        std::string          prompt;
+        bool                 has_image  = false;
+        std::vector<uint8_t> image_data; // raw JPEG/PNG bytes (not decoded)
+        bool                 stream     = false;
+        int                  max_tokens = -1;
+        bool                 thinking   = false;
+        int                  keep_hist  = 0;
     };
 
-    // Blocking, non-streaming inference (returns full text)
-    std::string RunBlocking(const InferRequest& req);
+    std::string RunBlocking (const InferRequest& req);
+    void        RunStreaming(const InferRequest& req,
+                             const std::string& req_id,
+                             httplib::DataSink& sink,
+                             bool openai_format);
 
-    // Streaming inference — writes SSE events into sink until done
-    void RunStreaming(const InferRequest& req,
-                      const std::string& req_id,
-                      httplib::DataSink& sink,
-                      bool openai_format);
-
-    // Build a fully-formatted Qwen3-VL chat prompt from OpenAI messages array
-    // Returns {prompt_text, has_image, decoded_image}
     struct ParsedChat {
-        std::string prompt;
-        bool        has_image = false;
-        cv::Mat     image;
-        bool        thinking  = false;
+        std::string          prompt;
+        bool                 has_image = false;
+        std::vector<uint8_t> image_data;
+        bool                 thinking  = false;
     };
     ParsedChat ParseChatMessages(const nlohmann::json& messages);
 
-    // Base64 helpers
-    static std::string Base64Decode(const std::string& in);
-    static cv::Mat     DecodeB64Image(const std::string& b64_or_url);
+    // Base64 decode → raw bytes
+    static std::vector<uint8_t> Base64DecodeBytes(const std::string& in);
 
-    // Unique ID generator
     static std::string MakeId(const char* prefix = "cmpl-");
 };
 
