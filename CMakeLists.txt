@@ -32,28 +32,17 @@ target_link_libraries(VLM_NPU
     -fopenmp -ldl -lpthread -lgomp)
 
 # ── Server target ───────────────────────────────────────────────────────────
-include(FetchContent)
-
-# cpp-httplib (header-only)
-FetchContent_Declare(httplib
-    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-    GIT_TAG        v0.18.0)
-FetchContent_MakeAvailable(httplib)
-
-# nlohmann/json (header-only)
-FetchContent_Declare(nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG        v3.11.3)
-FetchContent_MakeAvailable(nlohmann_json)
-
+# cpp-httplib and nlohmann/json are bundled in third_party/ (no internet needed)
 add_executable(VLM_server
     src/server_main.cpp
     src/server.cpp
     ${RKLLM_SOURCES})
 
+target_include_directories(VLM_server PRIVATE
+    third_party
+    third_party/nlohmann)
+
 target_link_libraries(VLM_server
-    httplib::httplib
-    nlohmann_json::nlohmann_json
     ${OPENCV_LIBRARIES}
     ${RK_LIB_PATH}/librknnrt.so
     ${RK_LIB_PATH}/librkllmrt.so
