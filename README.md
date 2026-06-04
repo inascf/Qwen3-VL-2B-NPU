@@ -75,7 +75,6 @@ To run the application, you have to:
 - OpenCV 64-bit installed.
 - rkllm library.
 - rknn library.
-- Optional: Code::Blocks. (```$ sudo apt-get install codeblocks```)
 
 ### Installing the dependencies.
 Start with the usual 
@@ -118,15 +117,14 @@ Copy both into this folder.
 ### Building the app.
 Once you have the two models, it is time to build your application.<br>
 
-**CMake** (recommended — builds both the CLI and the HTTP server):
 ```bash
 $ mkdir build
 $ cd build
-$ cmake ..          # downloads cpp-httplib and nlohmann/json automatically on first run
+$ cmake ..
 $ make -j4
 ```
 This produces two executables in the project root:
-- `VLM_NPU` — interactive CLI (original)
+- `VLM_NPU` — interactive CLI
 - `VLM_server` — HTTP server with llama-server / OpenAI-compatible API
 
 You can also build only one target:
@@ -134,12 +132,6 @@ You can also build only one target:
 $ make -j4 VLM_NPU
 $ make -j4 VLM_server
 ```
-
-**Code::Blocks** (CLI only):
-- Load the project file `*.cbp` in Code::Blocks.
-- Select _Release_, not Debug.
-- Compile and run with F9.
-- You can alter command line arguments with _Project → Set programs arguments..._
 
 ---
 
